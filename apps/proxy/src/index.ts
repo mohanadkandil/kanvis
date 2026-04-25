@@ -118,11 +118,17 @@ function rewriteHtml(
     })();</script>
   `.trim()
 
+  // Cache-bust the editor.js URL with a per-request token so the browser
+  // never serves a stale bundle. EDITOR_SCRIPT_URL doesn't change in prod
+  // builds, but in dev the bundle is rebuilt on every save and the iframe
+  // cache silently kept the old version.
+  const editorSrcWithVersion = `${env.EDITOR_SCRIPT_URL}${env.EDITOR_SCRIPT_URL.includes('?') ? '&' : '?'}v=${Date.now()}`
+
   const rewriter = new HTMLRewriter()
     .on('head', {
       element(el) {
         el.prepend(earlyInit, { html: true })
-        el.prepend(`<script src="${env.EDITOR_SCRIPT_URL}" defer></script>`, { html: true })
+        el.prepend(`<script src="${editorSrcWithVersion}" defer></script>`, { html: true })
       },
     })
     .on('meta[http-equiv]', {
