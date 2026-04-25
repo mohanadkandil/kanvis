@@ -2,25 +2,74 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
-import type { DOMEditOp } from '@kanvis/core'
+import type { EditOp } from '@kanvis/core'
 import { decodeEdits, encodeEdits } from '@/lib/url-hash'
 
 const PROXY_BASE = process.env.NEXT_PUBLIC_PROXY_BASE ?? 'http://localhost:8787'
 
+type AdditionalSelection = {
+  selector: string
+  tagName: string
+  classes: string[]
+  text: string
+  inlineStyle: string
+  outerHtml: string
+  childCount: number
+}
+
+type DesignTokens = {
+  body: { backgroundColor: string; color: string; fontFamily: string; fontSize: string; lineHeight: string }
+  headings: Record<string, { color: string; fontFamily: string; fontSize: string; fontWeight: string }>
+  link: { color: string; textDecoration: string } | null
+  button: {
+    backgroundColor: string
+    color: string
+    padding: string
+    borderRadius: string
+    fontFamily: string
+  } | null
+  topColors: string[]
+  topBackgrounds: string[]
+  radii: string[]
+  shadows: string[]
+  fontFamilies: string[]
+}
+
 type IncomingMessage =
   | { type: 'kanvis:ready' }
   | { type: 'kanvis:hover'; selector: string }
-  | { type: 'kanvis:select'; selector: string; tagName: string; classes: string[] }
-  | { type: 'kanvis:edit'; op: DOMEditOp }
+  | {
+      type: 'kanvis:select'
+      selector: string
+      tagName: string
+      classes: string[]
+      text?: string
+      inlineStyle?: string
+      outerHtml?: string
+      childCount?: number
+      additional?: AdditionalSelection[]
+    }
+  | { type: 'kanvis:edit'; op: EditOp }
+  | { type: 'kanvis:apply-failed'; selector: string; reason: string }
+  | { type: 'kanvis:design-tokens'; tokens: DesignTokens }
 
-type Selection = { selector: string; tagName: string; classes: string[] }
+type Selection = {
+  selector: string
+  tagName: string
+  classes: string[]
+  text: string
+  inlineStyle: string
+  outerHtml: string
+  childCount: number
+  additional: AdditionalSelection[]
+}
 
 export default function EditorClient() {
   const params = useSearchParams()
   const router = useRouter()
   const targetUrl = params.get('url') ?? ''
 
-  const [edits, setEdits] = useState<DOMEditOp[]>([])
+  const [edits, setEdits] = useState<EditOp[]>([])
   const [selected, setSelected] = useState<Selection | null>(null)
   const [ready, setReady] = useState(false)
   const [prompt, setPrompt] = useState('')
@@ -30,6 +79,27 @@ export default function EditorClient() {
   const [copied, setCopied] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const promptRef = useRef<HTMLTextAreaElement>(null)
+
+  // Ref mirror of edits so the message listener can read the latest value
+  // without being recreated on every change. Recreating the listener was
+  // tearing down the iframe→parent bridge mid-flight, dropping kanvis:select
+  // messages and leaving the Apply button stuck in a stale "disabled" state.
+  const editsRef = useRef<EditOp[]>([])
+  useEffect(() => {
+    editsRef.current = edits
+  }, [edits])
+
+  const designTokensRef = useRef<DesignTokens | null>(null)
+
+  // Tracks the in-flight chat request. Abort the previous one if a new submit
+  // fires before the old one finishes — defends against state-desync queueing
+  // multiple stale responses, and lets users retype quickly without waiting.
+  const inFlightControllerRef = useRef<AbortController | null>(null)
+  const [aiNoOpMessage, setAiNoOpMessage] = useState<string | null>(null)
+  const [designTokens, setDesignTokens] = useState<DesignTokens | null>(null)
+  useEffect(() => {
+    designTokensRef.current = designTokens
+  }, [designTokens])
 
   const proxiedSrc = useMemo(() => {
     if (!targetUrl) return ''
@@ -48,6 +118,8 @@ export default function EditorClient() {
     }
   }, [])
 
+  // Mount-once message bridge. Reads current edits via editsRef, never
+  // recreated on edit additions. Cleanup runs only on unmount.
   useEffect(() => {
     function onMessage(e: MessageEvent<IncomingMessage>) {
       if (!iframeRef.current || e.source !== iframeRef.current.contentWindow) return
@@ -55,28 +127,49 @@ export default function EditorClient() {
       if (!msg || typeof msg !== 'object' || !('type' in msg)) return
 
       switch (msg.type) {
-        case 'kanvis:ready':
+        case 'kanvis:ready': {
           setReady(true)
-          if (edits.length > 0 && iframeRef.current.contentWindow) {
+          const restoredEdits = editsRef.current
+          if (restoredEdits.length > 0 && iframeRef.current.contentWindow) {
             iframeRef.current.contentWindow.postMessage(
-              { type: 'kanvis:replay', edits },
+              { type: 'kanvis:replay', edits: restoredEdits },
               '*',
             )
           }
           break
+        }
         case 'kanvis:select':
-          setSelected({ selector: msg.selector, tagName: msg.tagName, classes: msg.classes })
-          // Auto-focus the prompt input when something gets selected.
+          // Empty selector → user shift-clicked-to-deselect everything.
+          if (!msg.selector) {
+            setSelected(null)
+            break
+          }
+          setSelected({
+            selector: msg.selector,
+            tagName: msg.tagName,
+            classes: msg.classes,
+            text: msg.text ?? '',
+            inlineStyle: msg.inlineStyle ?? '',
+            outerHtml: msg.outerHtml ?? '',
+            childCount: msg.childCount ?? 0,
+            additional: msg.additional ?? [],
+          })
           requestAnimationFrame(() => promptRef.current?.focus())
           break
         case 'kanvis:edit':
           setEdits((prev) => [...prev, msg.op])
           break
+        case 'kanvis:apply-failed':
+          setAiError(`Couldn't apply to ${msg.selector} (${msg.reason}). The page probably re-rendered. Click the element again.`)
+          break
+        case 'kanvis:design-tokens':
+          setDesignTokens(msg.tokens)
+          break
       }
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [edits])
+  }, [])
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -95,24 +188,51 @@ export default function EditorClient() {
       return
     }
 
+    // Cancel any previous in-flight request before starting a new one.
+    inFlightControllerRef.current?.abort()
+
+    // Snapshot the selection + prompt at request start so a click on a
+    // different element mid-request doesn't cross-pollinate.
+    const target = selected
+    const userPrompt = prompt.trim()
+
     setAiPending(true)
     setAiError(null)
+    setAiNoOpMessage(null)
 
-    // Hard timeout — guarantees the UI recovers even if the backend hangs.
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort('client_timeout'), 25_000)
+    inFlightControllerRef.current = controller
+    let didTimeOut = false
+    const timeoutId = setTimeout(() => {
+      didTimeOut = true
+      controller.abort()
+    }, 25_000)
 
-    console.log('[chat] →', { selector: selected.selector, prompt: prompt.trim() })
+    console.log('[chat] →', { selector: target.selector, prompt: userPrompt })
 
     try {
       const resp = await fetch('/api/edit', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          selector: selected.selector,
-          tagName: selected.tagName,
-          currentClasses: selected.classes,
-          prompt: prompt.trim(),
+          selector: target.selector,
+          tagName: target.tagName,
+          currentClasses: target.classes,
+          currentText: target.text,
+          currentInlineStyle: target.inlineStyle,
+          currentHtml: target.outerHtml,
+          childCount: target.childCount,
+          additional: target.additional.map((a) => ({
+            selector: a.selector,
+            tagName: a.tagName,
+            currentClasses: a.classes,
+            currentText: a.text,
+            currentInlineStyle: a.inlineStyle,
+            currentHtml: a.outerHtml,
+            childCount: a.childCount,
+          })),
+          designTokens: designTokensRef.current,
+          prompt: userPrompt,
         }),
         signal: controller.signal,
       })
@@ -124,18 +244,44 @@ export default function EditorClient() {
         setAiError(data.error || 'AI request failed')
         return
       }
+
+      if (data.changed === false) {
+        setAiNoOpMessage(data.rationale || 'No change needed.')
+        setPrompt('')
+        return
+      }
+
       iframeRef.current?.contentWindow?.postMessage(
-        { type: 'kanvis:apply-class', selector: selected.selector, before: data.before, after: data.after },
+        {
+          type: 'kanvis:apply-mutations',
+          selector: target.selector,
+          mutations: data.mutations,
+          rationale: data.rationale,
+          additionalSelectors: target.additional.map((a) => a.selector),
+        },
         '*',
       )
       setPrompt('')
     } catch (e) {
-      const aborted = e instanceof DOMException && e.name === 'AbortError'
-      const msg = aborted ? 'timed out after 25s' : e instanceof Error ? e.message : 'unknown error'
-      console.error('[chat] error:', msg, e)
-      setAiError(msg)
+      const aborted =
+        didTimeOut ||
+        controller.signal.aborted ||
+        (e instanceof DOMException && e.name === 'AbortError') ||
+        (e instanceof Error && /aborted|timeout/i.test(e.message))
+      // Aborts come from two sources: (a) the 25s timeout, (b) a newer submit
+      // superseding this one. Only show an error for (a).
+      if (aborted && didTimeOut) {
+        setAiError('request timed out after 25s')
+      } else if (!aborted) {
+        const msg = e instanceof Error ? e.message : 'unknown error'
+        console.error('[chat] error:', msg, e)
+        setAiError(msg)
+      }
     } finally {
       clearTimeout(timeoutId)
+      if (inFlightControllerRef.current === controller) {
+        inFlightControllerRef.current = null
+      }
       setAiPending(false)
     }
   }
@@ -190,6 +336,26 @@ export default function EditorClient() {
             </span>
           </div>
         </div>
+        {designTokens && (
+          <div
+            className="flex items-center gap-1 text-[10px] text-neutral-500"
+            title={`Site palette: ${[designTokens.body.backgroundColor, designTokens.body.color, ...designTokens.topBackgrounds].slice(0, 5).join(', ')} · Font: ${designTokens.body.fontFamily.split(',')[0]?.replace(/"/g, '')}`}
+          >
+            <span>taste</span>
+            <div className="flex items-center gap-0.5">
+              {[designTokens.body.backgroundColor, designTokens.body.color, ...designTokens.topBackgrounds.slice(0, 3)]
+                .filter((c, i, arr) => c && c !== 'transparent' && arr.indexOf(c) === i)
+                .slice(0, 5)
+                .map((color, i) => (
+                  <div
+                    key={i}
+                    className="h-3 w-3 rounded-sm border border-neutral-300 dark:border-neutral-700"
+                    style={{ backgroundColor: color }}
+                  />
+                ))}
+            </div>
+          </div>
+        )}
         <button
           onClick={() => setEditsOpen((v) => !v)}
           disabled={edits.length === 0}
@@ -244,7 +410,7 @@ export default function EditorClient() {
               )}
             </div>
             <div className="mt-1 text-[10px] text-neutral-500">
-              Drag the blue handles, or describe a change below
+              Shift-click another element to add it. Drag handles, or describe below.
             </div>
           </div>
         </div>
@@ -297,16 +463,107 @@ export default function EditorClient() {
                   <div className="truncate font-mono text-[10px] text-neutral-500" title={op.selector}>
                     {op.selector}
                   </div>
-                  <div className="mt-1.5 break-all">
-                    <span className="font-mono text-red-600 line-through decoration-red-300 dark:text-red-400">
-                      {op.before}
-                    </span>
-                  </div>
-                  <div className="mt-1 break-all">
-                    <span className="font-mono text-emerald-600 dark:text-emerald-400">
-                      {op.after}
-                    </span>
-                  </div>
+                  {op.kind === 'dom' && (
+                    <>
+                      <div className="mt-1.5 break-all">
+                        <span className="font-mono text-red-600 line-through decoration-red-300 dark:text-red-400">
+                          {op.before || '(empty)'}
+                        </span>
+                      </div>
+                      <div className="mt-1 break-all">
+                        <span className="font-mono text-emerald-600 dark:text-emerald-400">
+                          {op.after}
+                        </span>
+                      </div>
+                    </>
+                  )}
+                  {op.kind === 'style' && (
+                    <>
+                      <div className="mt-1.5 flex items-center gap-1.5">
+                        <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[9px] font-medium uppercase text-blue-700 dark:bg-blue-950 dark:text-blue-300">style</span>
+                      </div>
+                      <div className="mt-1 space-y-0.5">
+                        {Object.entries(op.styles).map(([prop, value]) => {
+                          const before = op.beforeStyles[prop]
+                          return (
+                            <div key={prop} className="break-all font-mono">
+                              <span className="text-neutral-500">{prop}:</span>{' '}
+                              {before ? (
+                                <>
+                                  <span className="text-red-600 line-through decoration-red-300 dark:text-red-400">{before}</span>
+                                  {' → '}
+                                </>
+                              ) : null}
+                              <span className="text-emerald-600 dark:text-emerald-400">{value}</span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                      {op.rationale && <div className="mt-1.5 text-[10px] italic text-neutral-500">{op.rationale}</div>}
+                    </>
+                  )}
+                  {op.kind === 'text' && (
+                    <>
+                      <div className="mt-1.5 flex items-center gap-1.5">
+                        <span className="rounded bg-purple-100 px-1.5 py-0.5 text-[9px] font-medium uppercase text-purple-700 dark:bg-purple-950 dark:text-purple-300">text</span>
+                      </div>
+                      <div className="mt-1.5 break-words">
+                        <span className="text-red-600 line-through decoration-red-300 dark:text-red-400">
+                          {op.before || '(empty)'}
+                        </span>
+                      </div>
+                      <div className="mt-1 break-words">
+                        <span className="text-emerald-600 dark:text-emerald-400">{op.after}</span>
+                      </div>
+                      {op.rationale && <div className="mt-1.5 text-[10px] italic text-neutral-500">{op.rationale}</div>}
+                    </>
+                  )}
+                  {op.kind === 'html' && (
+                    <>
+                      <div className="mt-1.5 flex items-center gap-1.5">
+                        <span className="rounded bg-fuchsia-100 px-1.5 py-0.5 text-[9px] font-medium uppercase text-fuchsia-700 dark:bg-fuchsia-950 dark:text-fuchsia-300">html</span>
+                      </div>
+                      <details className="mt-1.5">
+                        <summary className="cursor-pointer text-[10px] text-neutral-500 hover:text-neutral-700">
+                          show before/after HTML
+                        </summary>
+                        <div className="mt-1.5 break-all">
+                          <span className="block text-[10px] font-medium uppercase text-neutral-500">before</span>
+                          <pre className="mt-0.5 overflow-x-auto rounded bg-red-50 p-1.5 font-mono text-[10px] text-red-700 dark:bg-red-950 dark:text-red-300">{op.before || '(empty)'}</pre>
+                        </div>
+                        <div className="mt-1 break-all">
+                          <span className="block text-[10px] font-medium uppercase text-neutral-500">after</span>
+                          <pre className="mt-0.5 overflow-x-auto rounded bg-emerald-50 p-1.5 font-mono text-[10px] text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">{op.after}</pre>
+                        </div>
+                      </details>
+                      {op.rationale && <div className="mt-1.5 text-[10px] italic text-neutral-500">{op.rationale}</div>}
+                    </>
+                  )}
+                  {op.kind === 'attr' && (
+                    <>
+                      <div className="mt-1.5 flex items-center gap-1.5">
+                        <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-medium uppercase text-amber-700 dark:bg-amber-950 dark:text-amber-300">attr</span>
+                      </div>
+                      <div className="mt-1 space-y-0.5">
+                        {Object.entries(op.attributes).map(([name, value]) => {
+                          const before = op.beforeAttributes[name]
+                          return (
+                            <div key={name} className="break-all font-mono">
+                              <span className="text-neutral-500">{name}:</span>{' '}
+                              {before ? (
+                                <>
+                                  <span className="text-red-600 line-through decoration-red-300 dark:text-red-400">{before}</span>
+                                  {' → '}
+                                </>
+                              ) : null}
+                              <span className="text-emerald-600 dark:text-emerald-400">{value}</span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                      {op.rationale && <div className="mt-1.5 text-[10px] italic text-neutral-500">{op.rationale}</div>}
+                    </>
+                  )}
                 </li>
               ))}
             </ul>
@@ -329,7 +586,17 @@ export default function EditorClient() {
                 {selected ? (
                   <div className="mb-1 flex items-center gap-1.5 text-[10px] text-neutral-500">
                     <div className="h-1.5 w-1.5 rounded-full bg-blue-500" />
-                    Editing <span className="font-mono">{selected.tagName.toLowerCase()}</span>
+                    {selected.additional.length > 0 ? (
+                      <>
+                        Editing <span className="font-mono">{selected.tagName.toLowerCase()}</span>
+                        <span className="rounded-full bg-blue-100 px-1.5 text-[9px] font-medium text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+                          +{selected.additional.length}
+                        </span>
+                        <span className="text-neutral-400">{selected.additional.length + 1} targets</span>
+                      </>
+                    ) : (
+                      <>Editing <span className="font-mono">{selected.tagName.toLowerCase()}</span></>
+                    )}
                     <button
                       type="button"
                       onClick={() => setSelected(null)}
@@ -384,6 +651,20 @@ export default function EditorClient() {
             {aiError && (
               <div className="border-t border-red-200 bg-red-50 px-3 py-1.5 text-[11px] text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
                 {aiError}
+              </div>
+            )}
+            {aiNoOpMessage && !aiError && (
+              <div className="flex items-start gap-2 border-t border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-300">
+                <span className="mt-px">⊝</span>
+                <span className="flex-1">{aiNoOpMessage}</span>
+                <button
+                  type="button"
+                  onClick={() => setAiNoOpMessage(null)}
+                  className="ml-1 text-amber-500 hover:text-amber-800 dark:hover:text-amber-200"
+                  aria-label="Dismiss"
+                >
+                  ×
+                </button>
               </div>
             )}
           </form>
