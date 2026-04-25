@@ -9,14 +9,21 @@ compatibility_flags = ["nodejs_compat"]
 # binding = "KANVIS_CACHE"
 # id = "FILL_IN_AFTER_CREATE"
 
+# Defaults — used by `wrangler dev` for local development.
 [vars]
 EDITOR_SCRIPT_URL = "http://localhost:3000/editor.js"
 PROXY_FETCH_TIMEOUT_MS = "5000"
 PROXY_MAX_BYTES = "5000000"
 
-# Production overrides (uncomment + customize for prod deploy)
-# [env.production.vars]
-# EDITOR_SCRIPT_URL = "https://kanvis.app/editor.js"
+# Production — used by `wrangler deploy --env production`.
+# Update the EDITOR_SCRIPT_URL if your Vercel deployment URL changes.
+[env.production]
+name = "kanvis-proxy"
+
+[env.production.vars]
+EDITOR_SCRIPT_URL = "https://damascus-orpin.vercel.app/editor.js"
+PROXY_FETCH_TIMEOUT_MS = "5000"
+PROXY_MAX_BYTES = "5000000"
 
 [dev]
 port = 8787
