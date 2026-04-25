@@ -162,16 +162,50 @@ function captureSnapshot(el: Element, maxChars = 16000): string {
 // Capture the site's "taste" — colors, fonts, spacing, radii, shadows —
 // so AI-generated mutations match the existing design instead of defaulting
 // to Tailwind blue + sans-serif. Run once after the page loads, then cached.
+//
+// Structure is intentionally semantic: per-tag typography, role-labeled
+// colors (primary/secondary/muted/accent), and component archetypes.
+// The AI gets "the accent color is #22c55e" not just "color #22c55e".
 type DesignTokens = {
   body: { backgroundColor: string; color: string; fontFamily: string; fontSize: string; lineHeight: string }
   headings: Record<string, { color: string; fontFamily: string; fontSize: string; fontWeight: string }>
   link: { color: string; textDecoration: string } | null
   button: { backgroundColor: string; color: string; padding: string; borderRadius: string; fontFamily: string } | null
+  // Legacy fields kept for backwards compatibility with existing taste indicator UI.
   topColors: string[]
   topBackgrounds: string[]
   radii: string[]
   shadows: string[]
   fontFamilies: string[]
+  // New richer breakdown.
+  typography: Record<string, TypeStyle>
+  components: ComponentArchetypes
+  palette: PaletteRoles
+  system: { spacingScale: string[]; sampledElementCount: number }
+}
+
+type TypeStyle = {
+  color: string
+  fontFamily: string
+  fontSize: string
+  fontWeight: string
+  lineHeight?: string
+  letterSpacing?: string
+  textTransform?: string
+}
+
+type ComponentArchetypes = {
+  card?: { backgroundColor: string; padding: string; borderRadius: string; border: string; boxShadow?: string; childCount: number }
+  badge?: { backgroundColor: string; color: string; padding: string; borderRadius: string; fontSize: string }
+  section?: { backgroundColor: string; padding: string }
+}
+
+type PaletteRoles = {
+  primaryText: string
+  secondaryTexts: string[]   // other neutral text colors, ordered by frequency
+  mutedTexts: string[]       // light/dim neutrals
+  accents: string[]          // chromatic (saturated) colors — usually brand/CTA
+  surfaces: string[]         // backgrounds that aren't the page bg
 }
 
 function rgbToHex(rgb: string): string {
@@ -185,6 +219,28 @@ function rgbToHex(rgb: string): string {
   const a = m[4] ? parseFloat(m[4]) : 1
   if (a < 0.05) return 'transparent'
   return '#' + [r, g, b].map((n) => n.toString(16).padStart(2, '0')).join('')
+}
+
+// Returns saturation 0-1 for a hex color. Neutrals (gray-ish) have low
+// saturation; chromatic colors (true reds/blues/greens) have high.
+function colorSaturation(hex: string): number {
+  if (!hex.startsWith('#') || hex.length !== 7) return 0
+  const r = parseInt(hex.slice(1, 3), 16) / 255
+  const g = parseInt(hex.slice(3, 5), 16) / 255
+  const b = parseInt(hex.slice(5, 7), 16) / 255
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  if (max === 0) return 0
+  return (max - min) / max
+}
+
+// Returns lightness 0-1 for a hex color.
+function colorLightness(hex: string): number {
+  if (!hex.startsWith('#') || hex.length !== 7) return 0
+  const r = parseInt(hex.slice(1, 3), 16) / 255
+  const g = parseInt(hex.slice(3, 5), 16) / 255
+  const b = parseInt(hex.slice(5, 7), 16) / 255
+  return (Math.max(r, g, b) + Math.min(r, g, b)) / 2
 }
 
 function captureDesignTokens(): DesignTokens {
@@ -205,6 +261,16 @@ function captureDesignTokens(): DesignTokens {
     radii: [],
     shadows: [],
     fontFamilies: [],
+    typography: {},
+    components: {},
+    palette: {
+      primaryText: rgbToHex(body.color),
+      secondaryTexts: [],
+      mutedTexts: [],
+      accents: [],
+      surfaces: [],
+    },
+    system: { spacingScale: [], sampledElementCount: 0 },
   }
 
   // Headings — pull computed styles for h1/h2/h3 if present.
@@ -300,6 +366,158 @@ function captureDesignTokens(): DesignTokens {
     .map(([r]) => r)
   tokens.shadows = [...shadowSet]
   tokens.fontFamilies = [...fontSet]
+
+  // -- Per-tag typography ---------------------------------------------------
+  // For each semantic tag, sample multiple instances and pick the most common
+  // computed style. This catches sites where the first h2 is unstyled but
+  // most h2s share a consistent treatment.
+  const TYPOGRAPHY_TAGS = ['h1', 'h2', 'h3', 'h4', 'h5', 'p', 'a', 'small', 'span', 'li']
+  for (const tag of TYPOGRAPHY_TAGS) {
+    const els = Array.from(document.querySelectorAll(tag)).slice(0, 30)
+    if (els.length === 0) continue
+    // Fingerprint each instance's style — pick the most frequent fingerprint.
+    const fingerprintCounts = new Map<string, { count: number; sample: TypeStyle }>()
+    for (const el of els) {
+      if (isKanvisEl(el)) continue
+      const cs = getComputedStyle(el)
+      // Skip if element has no visible text (e.g., empty span).
+      if (!(el.textContent ?? '').trim()) continue
+      const sample: TypeStyle = {
+        color: rgbToHex(cs.color),
+        fontFamily: (cs.fontFamily.split(',')[0] ?? '').trim().replace(/['"]/g, ''),
+        fontSize: cs.fontSize,
+        fontWeight: cs.fontWeight,
+        lineHeight: cs.lineHeight,
+        letterSpacing: cs.letterSpacing,
+        textTransform: cs.textTransform === 'none' ? undefined : cs.textTransform,
+      }
+      const fp = `${sample.color}|${sample.fontSize}|${sample.fontWeight}|${sample.fontFamily}`
+      const existing = fingerprintCounts.get(fp)
+      if (existing) existing.count += 1
+      else fingerprintCounts.set(fp, { count: 1, sample })
+    }
+    // Pick the most-frequent style.
+    const winner = [...fingerprintCounts.values()].sort((a, b) => b.count - a.count)[0]
+    if (winner) tokens.typography[tag] = winner.sample
+  }
+
+  // -- Component archetypes -------------------------------------------------
+  // Find a representative card: an element with bg ≠ page bg, padding > 0,
+  // and at least 2 children. The most common (bg, padding) pair wins.
+  const cardCandidates = Array.from(
+    document.querySelectorAll('div, article, section, li, [class*="card" i]'),
+  ).slice(0, 200)
+  const cardCounts = new Map<string, { count: number; sample: ComponentArchetypes['card'] }>()
+  for (const el of cardCandidates) {
+    if (isKanvisEl(el)) continue
+    const cs = getComputedStyle(el)
+    const bg = rgbToHex(cs.backgroundColor)
+    if (bg === 'transparent' || bg === tokens.body.backgroundColor) continue
+    if (el.children.length < 2) continue
+    const padTop = parseFloat(cs.paddingTop)
+    if (!padTop || padTop < 6) continue
+    const sample = {
+      backgroundColor: bg,
+      padding: cs.padding,
+      borderRadius: cs.borderRadius,
+      border: cs.border,
+      boxShadow: cs.boxShadow !== 'none' ? cs.boxShadow : undefined,
+      childCount: el.children.length,
+    }
+    const fp = `${sample.backgroundColor}|${sample.padding}|${sample.borderRadius}`
+    const existing = cardCounts.get(fp)
+    if (existing) existing.count += 1
+    else cardCounts.set(fp, { count: 1, sample })
+  }
+  const cardWinner = [...cardCounts.values()].sort((a, b) => b.count - a.count)[0]
+  if (cardWinner) tokens.components.card = cardWinner.sample
+
+  // Badge archetype: small inline element with bg color.
+  const badgeCandidates = Array.from(
+    document.querySelectorAll(
+      'span[class*="badge" i], span[class*="tag" i], span[class*="pill" i], ' +
+      '[class*="badge" i], [class*="tag" i], [class*="pill" i]',
+    ),
+  ).slice(0, 30)
+  for (const el of badgeCandidates) {
+    if (isKanvisEl(el)) continue
+    const cs = getComputedStyle(el)
+    const bg = rgbToHex(cs.backgroundColor)
+    if (bg === 'transparent' || bg === tokens.body.backgroundColor) continue
+    tokens.components.badge = {
+      backgroundColor: bg,
+      color: rgbToHex(cs.color),
+      padding: cs.padding,
+      borderRadius: cs.borderRadius,
+      fontSize: cs.fontSize,
+    }
+    break
+  }
+
+  // Section archetype: top-level layout container.
+  const sectionEl = document.querySelector('section, main > div, [class*="section" i]')
+  if (sectionEl && !isKanvisEl(sectionEl)) {
+    const cs = getComputedStyle(sectionEl)
+    tokens.components.section = {
+      backgroundColor: rgbToHex(cs.backgroundColor),
+      padding: cs.padding,
+    }
+  }
+
+  // -- Spacing scale -------------------------------------------------------
+  // Sweep padding/margin values across the sample to discover the design's
+  // native scale (e.g. "0.5rem, 1rem, 1.5rem, 2rem").
+  const spacingCounts = new Map<string, number>()
+  for (const el of generic.slice(0, 400)) {
+    if (!el || isKanvisEl(el)) continue
+    const cs = getComputedStyle(el)
+    for (const key of ['paddingTop', 'paddingLeft', 'marginTop', 'gap'] as const) {
+      const v = (cs as unknown as Record<string, string>)[key]
+      if (v && v !== '0px' && v !== 'normal') {
+        spacingCounts.set(v, (spacingCounts.get(v) ?? 0) + 1)
+      }
+    }
+  }
+  tokens.system.spacingScale = [...spacingCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([v]) => v)
+
+  // -- Color role classification -------------------------------------------
+  // Split top text colors into neutral vs chromatic (accents). Within
+  // neutrals, label by lightness: dark = primary/secondary, light = muted.
+  const allTextColors = [...colorCounts.entries()].sort((a, b) => b[1] - a[1])
+  const primary = tokens.body.color
+  const neutrals: string[] = []
+  const accents: string[] = []
+  for (const [color] of allTextColors) {
+    if (color === primary) continue
+    const sat = colorSaturation(color)
+    if (sat < 0.15) neutrals.push(color)
+    else accents.push(color)
+  }
+  tokens.palette.primaryText = primary
+  // Sort neutrals by lightness — darker colors usually serve as secondary,
+  // lighter ones as muted/disabled.
+  const neutralSortedByLight = [...neutrals].sort((a, b) => colorLightness(a) - colorLightness(b))
+  // The body color is presumed darker (primary). Things darker still are unusual
+  // — most likely strong-emphasis like h1 color. Things lighter than body are
+  // secondary/muted.
+  tokens.palette.secondaryTexts = neutralSortedByLight
+    .filter((c) => colorLightness(c) <= colorLightness(primary) + 0.15)
+    .slice(0, 3)
+  tokens.palette.mutedTexts = neutralSortedByLight
+    .filter((c) => colorLightness(c) > colorLightness(primary) + 0.15)
+    .slice(0, 3)
+  tokens.palette.accents = accents.slice(0, 4)
+
+  // Surfaces: backgrounds that aren't the page bg, sorted by frequency.
+  tokens.palette.surfaces = [...bgCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([c]) => c)
+
+  tokens.system.sampledElementCount = generic.length + targeted.length
 
   return tokens
 }

@@ -128,6 +128,26 @@
       return "transparent";
     return "#" + [r, g, b].map((n) => n.toString(16).padStart(2, "0")).join("");
   }
+  function colorSaturation(hex) {
+    if (!hex.startsWith("#") || hex.length !== 7)
+      return 0;
+    const r = parseInt(hex.slice(1, 3), 16) / 255;
+    const g = parseInt(hex.slice(3, 5), 16) / 255;
+    const b = parseInt(hex.slice(5, 7), 16) / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    if (max === 0)
+      return 0;
+    return (max - min) / max;
+  }
+  function colorLightness(hex) {
+    if (!hex.startsWith("#") || hex.length !== 7)
+      return 0;
+    const r = parseInt(hex.slice(1, 3), 16) / 255;
+    const g = parseInt(hex.slice(3, 5), 16) / 255;
+    const b = parseInt(hex.slice(5, 7), 16) / 255;
+    return (Math.max(r, g, b) + Math.min(r, g, b)) / 2;
+  }
   function captureDesignTokens() {
     const body = getComputedStyle(document.body);
     const tokens = {
@@ -145,7 +165,17 @@
       topBackgrounds: [],
       radii: [],
       shadows: [],
-      fontFamilies: []
+      fontFamilies: [],
+      typography: {},
+      components: {},
+      palette: {
+        primaryText: rgbToHex(body.color),
+        secondaryTexts: [],
+        mutedTexts: [],
+        accents: [],
+        surfaces: []
+      },
+      system: { spacingScale: [], sampledElementCount: 0 }
     };
     for (const tag of ["h1", "h2", "h3"]) {
       const el = document.querySelector(tag);
@@ -212,6 +242,128 @@
     tokens.radii = [...radiusCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([r]) => r);
     tokens.shadows = [...shadowSet];
     tokens.fontFamilies = [...fontSet];
+    const TYPOGRAPHY_TAGS = ["h1", "h2", "h3", "h4", "h5", "p", "a", "small", "span", "li"];
+    for (const tag of TYPOGRAPHY_TAGS) {
+      const els = Array.from(document.querySelectorAll(tag)).slice(0, 30);
+      if (els.length === 0)
+        continue;
+      const fingerprintCounts = new Map;
+      for (const el of els) {
+        if (isKanvisEl(el))
+          continue;
+        const cs = getComputedStyle(el);
+        if (!(el.textContent ?? "").trim())
+          continue;
+        const sample = {
+          color: rgbToHex(cs.color),
+          fontFamily: (cs.fontFamily.split(",")[0] ?? "").trim().replace(/['"]/g, ""),
+          fontSize: cs.fontSize,
+          fontWeight: cs.fontWeight,
+          lineHeight: cs.lineHeight,
+          letterSpacing: cs.letterSpacing,
+          textTransform: cs.textTransform === "none" ? undefined : cs.textTransform
+        };
+        const fp = `${sample.color}|${sample.fontSize}|${sample.fontWeight}|${sample.fontFamily}`;
+        const existing = fingerprintCounts.get(fp);
+        if (existing)
+          existing.count += 1;
+        else
+          fingerprintCounts.set(fp, { count: 1, sample });
+      }
+      const winner = [...fingerprintCounts.values()].sort((a, b) => b.count - a.count)[0];
+      if (winner)
+        tokens.typography[tag] = winner.sample;
+    }
+    const cardCandidates = Array.from(document.querySelectorAll('div, article, section, li, [class*="card" i]')).slice(0, 200);
+    const cardCounts = new Map;
+    for (const el of cardCandidates) {
+      if (isKanvisEl(el))
+        continue;
+      const cs = getComputedStyle(el);
+      const bg = rgbToHex(cs.backgroundColor);
+      if (bg === "transparent" || bg === tokens.body.backgroundColor)
+        continue;
+      if (el.children.length < 2)
+        continue;
+      const padTop = parseFloat(cs.paddingTop);
+      if (!padTop || padTop < 6)
+        continue;
+      const sample = {
+        backgroundColor: bg,
+        padding: cs.padding,
+        borderRadius: cs.borderRadius,
+        border: cs.border,
+        boxShadow: cs.boxShadow !== "none" ? cs.boxShadow : undefined,
+        childCount: el.children.length
+      };
+      const fp = `${sample.backgroundColor}|${sample.padding}|${sample.borderRadius}`;
+      const existing = cardCounts.get(fp);
+      if (existing)
+        existing.count += 1;
+      else
+        cardCounts.set(fp, { count: 1, sample });
+    }
+    const cardWinner = [...cardCounts.values()].sort((a, b) => b.count - a.count)[0];
+    if (cardWinner)
+      tokens.components.card = cardWinner.sample;
+    const badgeCandidates = Array.from(document.querySelectorAll('span[class*="badge" i], span[class*="tag" i], span[class*="pill" i], ' + '[class*="badge" i], [class*="tag" i], [class*="pill" i]')).slice(0, 30);
+    for (const el of badgeCandidates) {
+      if (isKanvisEl(el))
+        continue;
+      const cs = getComputedStyle(el);
+      const bg = rgbToHex(cs.backgroundColor);
+      if (bg === "transparent" || bg === tokens.body.backgroundColor)
+        continue;
+      tokens.components.badge = {
+        backgroundColor: bg,
+        color: rgbToHex(cs.color),
+        padding: cs.padding,
+        borderRadius: cs.borderRadius,
+        fontSize: cs.fontSize
+      };
+      break;
+    }
+    const sectionEl = document.querySelector('section, main > div, [class*="section" i]');
+    if (sectionEl && !isKanvisEl(sectionEl)) {
+      const cs = getComputedStyle(sectionEl);
+      tokens.components.section = {
+        backgroundColor: rgbToHex(cs.backgroundColor),
+        padding: cs.padding
+      };
+    }
+    const spacingCounts = new Map;
+    for (const el of generic.slice(0, 400)) {
+      if (!el || isKanvisEl(el))
+        continue;
+      const cs = getComputedStyle(el);
+      for (const key of ["paddingTop", "paddingLeft", "marginTop", "gap"]) {
+        const v = cs[key];
+        if (v && v !== "0px" && v !== "normal") {
+          spacingCounts.set(v, (spacingCounts.get(v) ?? 0) + 1);
+        }
+      }
+    }
+    tokens.system.spacingScale = [...spacingCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([v]) => v);
+    const allTextColors = [...colorCounts.entries()].sort((a, b) => b[1] - a[1]);
+    const primary = tokens.body.color;
+    const neutrals = [];
+    const accents = [];
+    for (const [color] of allTextColors) {
+      if (color === primary)
+        continue;
+      const sat = colorSaturation(color);
+      if (sat < 0.15)
+        neutrals.push(color);
+      else
+        accents.push(color);
+    }
+    tokens.palette.primaryText = primary;
+    const neutralSortedByLight = [...neutrals].sort((a, b) => colorLightness(a) - colorLightness(b));
+    tokens.palette.secondaryTexts = neutralSortedByLight.filter((c) => colorLightness(c) <= colorLightness(primary) + 0.15).slice(0, 3);
+    tokens.palette.mutedTexts = neutralSortedByLight.filter((c) => colorLightness(c) > colorLightness(primary) + 0.15).slice(0, 3);
+    tokens.palette.accents = accents.slice(0, 4);
+    tokens.palette.surfaces = [...bgCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([c]) => c);
+    tokens.system.sampledElementCount = generic.length + targeted.length;
     return tokens;
   }
   function send(msg) {
