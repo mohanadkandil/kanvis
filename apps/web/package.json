@@ -1,0 +1,30 @@
+{
+  "name": "@kanvis/web",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:editor": "bun build ../../packages/core/src/editor-script.ts --target browser --format iife --outfile public/editor.js",
+    "predev": "bun run build:editor",
+    "prebuild": "bun run build:editor",
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@kanvis/core": "workspace:*",
+    "next": "^15.0.3",
+    "openai": "^6.34.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.0.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tailwindcss": "^4.0.0"
+  }
+}

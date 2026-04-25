@@ -3,13 +3,20 @@ main = "src/index.ts"
 compatibility_date = "2026-04-25"
 compatibility_flags = ["nodejs_compat"]
 
-# KV namespace for proxied-page cache (ARCH-1, PERF-4).
-# Uncomment after running: wrangler kv:namespace create kanvis_cache
+# KV cache for proxied responses (PERF-4 from /plan-eng-review).
+# Run `wrangler kv namespace create kanvis_cache` then paste the id below.
 # [[kv_namespaces]]
 # binding = "KANVIS_CACHE"
 # id = "FILL_IN_AFTER_CREATE"
 
 [vars]
-EDITOR_SCRIPT_URL = "https://kanvis.app/static/editor.js"
+EDITOR_SCRIPT_URL = "http://localhost:3000/editor.js"
 PROXY_FETCH_TIMEOUT_MS = "5000"
 PROXY_MAX_BYTES = "5000000"
+
+# Production overrides (uncomment + customize for prod deploy)
+# [env.production.vars]
+# EDITOR_SCRIPT_URL = "https://kanvis.app/editor.js"
+
+[dev]
+port = 8787
