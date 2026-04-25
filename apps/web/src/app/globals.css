@@ -1,7 +1,24 @@
 @import "tailwindcss";
 
+@theme {
+  --font-sans: var(--font-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-serif: var(--font-serif), "Iowan Old Style", Georgia, serif;
+  --font-mono: var(--font-mono), ui-monospace, "SF Mono", Consolas, monospace;
+
+  /* Dark, premium, editorial palette. */
+  --color-ink: #0a0908;
+  --color-ink-soft: #14110f;
+  --color-ink-rule: #1f1c19;
+  --color-paper: #f5f3ee;
+  --color-paper-soft: #c8c4bb;
+  --color-paper-muted: #6c6862;
+  --color-spark: #d4ff3c;
+  --color-spark-soft: #2d3713;
+  --color-kanvis-blue: #3b82f6;
+}
+
 :root {
-  color-scheme: light dark;
+  color-scheme: dark;
 }
 
 html, body {
@@ -9,6 +26,70 @@ html, body {
 }
 
 body {
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11";
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
+
+/* Subtle film grain — adds tactility without an asset request. */
+.bg-grain::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.6;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.06 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+
+/* Hairline rules in the @theme color. */
+.rule { border-color: var(--color-ink-rule); }
+
+@keyframes kanvis-fadein {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.kanvis-stagger > * {
+  opacity: 0;
+  animation: kanvis-fadein 800ms cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+}
+.kanvis-stagger > *:nth-child(1) { animation-delay: 0ms; }
+.kanvis-stagger > *:nth-child(2) { animation-delay: 90ms; }
+.kanvis-stagger > *:nth-child(3) { animation-delay: 180ms; }
+.kanvis-stagger > *:nth-child(4) { animation-delay: 270ms; }
+.kanvis-stagger > *:nth-child(5) { animation-delay: 360ms; }
+.kanvis-stagger > *:nth-child(6) { animation-delay: 450ms; }
+
+/* Live editor moment in the mock browser. Cycles through hover → drag → applied. */
+@keyframes kanvis-highlight-pulse {
+  0%, 18%   { box-shadow: 0 0 0 2px rgba(59, 130, 246, 0); }
+  22%, 60%  { box-shadow: 0 0 0 2px rgba(59, 130, 246, 1), 0 0 0 9999px rgba(0,0,0,0.05); }
+  64%, 100% { box-shadow: 0 0 0 2px rgba(59, 130, 246, 0); }
+}
+@keyframes kanvis-color-morph {
+  0%, 60%   { color: #f5f3ee; }
+  68%, 100% { color: #ff5a1f; }
+}
+@keyframes kanvis-chat-fade {
+  0%, 22%  { opacity: 0; transform: translateY(8px); }
+  30%, 88% { opacity: 1; transform: translateY(0); }
+  92%, 100%{ opacity: 0; transform: translateY(8px); }
+}
+@keyframes kanvis-cursor {
+  0%, 20%  { opacity: 0; transform: translate(0, 0) scale(1); }
+  22%, 26% { opacity: 1; transform: translate(0, 0) scale(1); }
+  50%      { opacity: 1; transform: translate(0, 0) scale(0.7); }
+  60%      { opacity: 1; transform: translate(0, 32px) scale(1); }
+  80%, 100%{ opacity: 0; transform: translate(0, 32px) scale(1); }
+}
+@keyframes kanvis-marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+.kanvis-loop          { animation: kanvis-highlight-pulse 6s ease-in-out infinite; }
+.kanvis-loop-color    { animation: kanvis-color-morph    6s ease-in-out infinite; }
+.kanvis-loop-chat     { animation: kanvis-chat-fade      6s ease-in-out infinite; }
+.kanvis-loop-cursor   { animation: kanvis-cursor         6s ease-in-out infinite; }
+.kanvis-loop-marquee  { animation: kanvis-marquee 40s linear infinite; }
