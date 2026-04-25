@@ -26,7 +26,12 @@
   };
   var hoverEl = null;
   var selectedEl = null;
+  var selectedEls = [];
   var resizeObs = null;
+  var MULTI_OVERLAY_PREFIX = "__kanvis_multi_overlay_";
+  function sanitizeHtml(html) {
+    return html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "").replace(/<\/?script[^>]*>/gi, "").replace(/\son\w+\s*=\s*"[^"]*"/gi, "").replace(/\son\w+\s*=\s*'[^']*'/gi, "").replace(/\son\w+\s*=\s*[^\s>]+/gi, "").replace(/(\s(?:href|src|action|formaction)\s*=\s*["'])\s*javascript:/gi, "$1#blocked-").replace(/(\s(?:href|src)\s*=\s*["'])\s*data:text\/html/gi, "$1#blocked-");
+  }
   function injectStyles() {
     if (document.getElementById(STYLE_ID))
       return;
@@ -101,6 +106,111 @@
     const text = (el.textContent ?? "").trim().slice(0, 50);
     return `${el.tagName.toLowerCase()}|${text}`;
   }
+  function captureSnapshot(el, maxChars = 4000) {
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll(`#${HOVER_OVERLAY_ID}, #${SELECT_OVERLAY_ID}, .${HANDLE_CLASS}, [id^="${MULTI_OVERLAY_PREFIX}"], #${STYLE_ID}`).forEach((n) => n.remove());
+    const html = clone.outerHTML ?? "";
+    if (html.length <= maxChars)
+      return html;
+    return html.slice(0, maxChars) + " …[truncated]";
+  }
+  function rgbToHex(rgb) {
+    if (/^#/.test(rgb))
+      return rgb;
+    const m = rgb.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+    if (!m)
+      return rgb;
+    const r = parseInt(m[1] ?? "0", 10);
+    const g = parseInt(m[2] ?? "0", 10);
+    const b = parseInt(m[3] ?? "0", 10);
+    const a = m[4] ? parseFloat(m[4]) : 1;
+    if (a < 0.05)
+      return "transparent";
+    return "#" + [r, g, b].map((n) => n.toString(16).padStart(2, "0")).join("");
+  }
+  function captureDesignTokens() {
+    const body = getComputedStyle(document.body);
+    const tokens = {
+      body: {
+        backgroundColor: rgbToHex(body.backgroundColor),
+        color: rgbToHex(body.color),
+        fontFamily: body.fontFamily,
+        fontSize: body.fontSize,
+        lineHeight: body.lineHeight
+      },
+      headings: {},
+      link: null,
+      button: null,
+      topColors: [],
+      topBackgrounds: [],
+      radii: [],
+      shadows: [],
+      fontFamilies: []
+    };
+    for (const tag of ["h1", "h2", "h3"]) {
+      const el = document.querySelector(tag);
+      if (el) {
+        const cs = getComputedStyle(el);
+        tokens.headings[tag] = {
+          color: rgbToHex(cs.color),
+          fontFamily: cs.fontFamily,
+          fontSize: cs.fontSize,
+          fontWeight: cs.fontWeight
+        };
+      }
+    }
+    const linkEl = document.querySelector("a[href]");
+    if (linkEl) {
+      const cs = getComputedStyle(linkEl);
+      tokens.link = { color: rgbToHex(cs.color), textDecoration: cs.textDecoration.split(" ")[0] ?? "none" };
+    }
+    const btnEl = document.querySelector('button, .btn, [role="button"]');
+    if (btnEl) {
+      const cs = getComputedStyle(btnEl);
+      tokens.button = {
+        backgroundColor: rgbToHex(cs.backgroundColor),
+        color: rgbToHex(cs.color),
+        padding: cs.padding,
+        borderRadius: cs.borderRadius,
+        fontFamily: cs.fontFamily
+      };
+    }
+    const colorCounts = new Map;
+    const bgCounts = new Map;
+    const radiusCounts = new Map;
+    const shadowSet = new Set;
+    const fontSet = new Set;
+    const candidates = Array.from(document.querySelectorAll("*"));
+    const sampleSize = Math.min(candidates.length, 300);
+    for (let i = 0;i < sampleSize; i++) {
+      const el = candidates[i];
+      if (!el || isKanvisEl(el))
+        continue;
+      const cs = getComputedStyle(el);
+      const color = rgbToHex(cs.color);
+      if (color !== "transparent")
+        colorCounts.set(color, (colorCounts.get(color) ?? 0) + 1);
+      const bg = rgbToHex(cs.backgroundColor);
+      if (bg !== "transparent" && bg !== tokens.body.backgroundColor) {
+        bgCounts.set(bg, (bgCounts.get(bg) ?? 0) + 1);
+      }
+      const r = cs.borderRadius;
+      if (r && r !== "0px")
+        radiusCounts.set(r, (radiusCounts.get(r) ?? 0) + 1);
+      const sh = cs.boxShadow;
+      if (sh && sh !== "none" && shadowSet.size < 4)
+        shadowSet.add(sh);
+      const ff = cs.fontFamily;
+      if (ff && fontSet.size < 4)
+        fontSet.add(ff);
+    }
+    tokens.topColors = [...colorCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([c]) => c);
+    tokens.topBackgrounds = [...bgCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([c]) => c);
+    tokens.radii = [...radiusCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([r]) => r);
+    tokens.shadows = [...shadowSet];
+    tokens.fontFamilies = [...fontSet];
+    return tokens;
+  }
   function send(msg) {
     window.parent.postMessage(msg, "*");
   }
@@ -131,7 +241,11 @@
         return;
       e.preventDefault();
       e.stopPropagation();
-      selectElement(target);
+      if (e.shiftKey || e.metaKey || e.ctrlKey) {
+        toggleAdditionalSelection(target);
+      } else {
+        selectElement(target);
+      }
     }, true);
     document.addEventListener("click", (e) => {
       const a = e.target?.closest("a");
@@ -141,23 +255,87 @@
       }
     }, true);
   }
-  function selectElement(el) {
-    selectedEl = el;
-    positionOverlay(SELECT_OVERLAY_ID, el);
-    positionOverlay(HOVER_OVERLAY_ID, null);
+  function clearMultiOverlays() {
+    document.querySelectorAll(`[id^="${MULTI_OVERLAY_PREFIX}"]`).forEach((n) => n.remove());
+  }
+  function renderMultiOverlays() {
+    clearMultiOverlays();
+    selectedEls.filter((el) => el !== selectedEl).forEach((el, i) => {
+      const overlay = document.createElement("div");
+      overlay.id = `${MULTI_OVERLAY_PREFIX}${i}`;
+      Object.assign(overlay.style, {
+        position: "fixed",
+        pointerEvents: "none",
+        zIndex: "2147483646",
+        borderRadius: "4px",
+        boxSizing: "border-box",
+        border: "2px solid rgba(59,130,246,0.7)",
+        boxShadow: "0 0 0 1px rgba(59,130,246,0.3)"
+      });
+      const rect = el.getBoundingClientRect();
+      overlay.style.left = `${rect.left}px`;
+      overlay.style.top = `${rect.top}px`;
+      overlay.style.width = `${rect.width}px`;
+      overlay.style.height = `${rect.height}px`;
+      document.body.appendChild(overlay);
+    });
+  }
+  function emitSelectionState() {
     send({
       type: "kanvis:select",
-      selector: buildSelector(el),
-      tagName: el.tagName,
-      classes: Array.from(el.classList)
+      selector: selectedEl ? buildSelector(selectedEl) : "",
+      tagName: selectedEl?.tagName ?? "",
+      classes: selectedEl ? Array.from(selectedEl.classList) : [],
+      text: selectedEl ? (selectedEl.textContent ?? "").trim().slice(0, 200) : "",
+      inlineStyle: selectedEl ? selectedEl.style.cssText || "" : "",
+      outerHtml: selectedEl ? captureSnapshot(selectedEl) : "",
+      childCount: selectedEl ? selectedEl.children.length : 0,
+      additional: selectedEls.filter((el) => el !== selectedEl).map((el) => ({
+        selector: buildSelector(el),
+        tagName: el.tagName,
+        classes: Array.from(el.classList),
+        text: (el.textContent ?? "").trim().slice(0, 200),
+        inlineStyle: el.style.cssText || "",
+        outerHtml: captureSnapshot(el),
+        childCount: el.children.length
+      }))
     });
+  }
+  function selectElement(el) {
+    selectedEl = el;
+    selectedEls = [el];
+    positionOverlay(SELECT_OVERLAY_ID, el);
+    positionOverlay(HOVER_OVERLAY_ID, null);
+    clearMultiOverlays();
+    emitSelectionState();
     showHandles(el);
     resizeObs?.disconnect();
     resizeObs = new ResizeObserver(() => {
       positionOverlay(SELECT_OVERLAY_ID, el);
       showHandles(el);
+      renderMultiOverlays();
     });
     resizeObs.observe(el);
+  }
+  function toggleAdditionalSelection(el) {
+    const idx = selectedEls.indexOf(el);
+    if (idx >= 0) {
+      selectedEls.splice(idx, 1);
+      if (el === selectedEl) {
+        selectedEl = selectedEls[0] ?? null;
+      }
+    } else {
+      selectedEls.push(el);
+    }
+    if (selectedEl) {
+      positionOverlay(SELECT_OVERLAY_ID, selectedEl);
+      showHandles(selectedEl);
+    } else {
+      positionOverlay(SELECT_OVERLAY_ID, null);
+      document.querySelectorAll(`.${HANDLE_CLASS}`).forEach((n) => n.remove());
+    }
+    renderMultiOverlays();
+    emitSelectionState();
   }
   function showHandles(el) {
     document.querySelectorAll(`.${HANDLE_CLASS}`).forEach((n) => n.remove());
@@ -255,9 +433,15 @@
       } else if (msg.type === "kanvis:reset") {
         window.location.reload();
       } else if (msg.type === "kanvis:apply-class") {
-        const el = document.querySelector(msg.selector);
-        if (!el)
+        let el = document.querySelector(msg.selector);
+        if (!el && selectedEl) {
+          const fp = fingerprint(selectedEl);
+          el = Array.from(document.querySelectorAll(fp.split("|")[0] ?? "*")).find((node) => fingerprint(node) === fp) ?? null;
+        }
+        if (!el) {
+          send({ type: "kanvis:apply-failed", selector: msg.selector, reason: "element_not_found" });
           return;
+        }
         el.className = msg.after;
         if (selectedEl === el) {
           positionOverlay(SELECT_OVERLAY_ID, el);
@@ -272,6 +456,144 @@
           after: msg.after
         };
         send({ type: "kanvis:edit", op });
+      } else if (msg.type === "kanvis:apply-styles") {
+        let el = document.querySelector(msg.selector);
+        if (!el && selectedEl) {
+          const fp = fingerprint(selectedEl);
+          el = Array.from(document.querySelectorAll(fp.split("|")[0] ?? "*")).find((node) => fingerprint(node) === fp) ?? null;
+        }
+        if (!el) {
+          send({ type: "kanvis:apply-failed", selector: msg.selector, reason: "element_not_found" });
+          return;
+        }
+        const beforeStyles = {};
+        for (const prop of Object.keys(msg.styles)) {
+          beforeStyles[prop] = el.style.getPropertyValue(prop);
+        }
+        for (const [prop, value] of Object.entries(msg.styles)) {
+          el.style.setProperty(prop, value);
+        }
+        if (selectedEl === el) {
+          positionOverlay(SELECT_OVERLAY_ID, el);
+          showHandles(el);
+        }
+        send({
+          type: "kanvis:edit",
+          op: {
+            kind: "style",
+            selector: msg.selector,
+            fingerprint: fingerprint(el),
+            styles: msg.styles,
+            beforeStyles,
+            rationale: msg.rationale
+          }
+        });
+      } else if (msg.type === "kanvis:apply-mutations") {
+        const allSelectors = [msg.selector, ...msg.additionalSelectors ?? []];
+        const targets = [];
+        for (const sel of allSelectors) {
+          let el = document.querySelector(sel);
+          if (!el && selectedEl) {
+            const fp = fingerprint(selectedEl);
+            el = Array.from(document.querySelectorAll(fp.split("|")[0] ?? "*")).find((node) => fingerprint(node) === fp) ?? null;
+          }
+          if (el)
+            targets.push(el);
+        }
+        if (targets.length === 0) {
+          send({ type: "kanvis:apply-failed", selector: msg.selector, reason: "element_not_found" });
+          return;
+        }
+        const styleMutations = msg.mutations.filter((m) => m.kind === "style");
+        const textMutations = msg.mutations.filter((m) => m.kind === "text");
+        const attrMutations = msg.mutations.filter((m) => m.kind === "attr");
+        const htmlMutations = msg.mutations.filter((m) => m.kind === "html");
+        for (let i = 0;i < targets.length; i++) {
+          const el = targets[i];
+          const elSelector = allSelectors[i] ?? msg.selector;
+          if (styleMutations.length > 0) {
+            const styles = {};
+            const beforeStyles = {};
+            for (const m of styleMutations) {
+              beforeStyles[m.target] = el.style.getPropertyValue(m.target);
+              styles[m.target] = m.value;
+              el.style.setProperty(m.target, m.value);
+            }
+            send({
+              type: "kanvis:edit",
+              op: {
+                kind: "style",
+                selector: elSelector,
+                fingerprint: fingerprint(el),
+                styles,
+                beforeStyles,
+                rationale: msg.rationale
+              }
+            });
+          }
+          if (textMutations.length > 0) {
+            const last = textMutations[textMutations.length - 1];
+            if (last) {
+              const before = el.textContent ?? "";
+              el.textContent = last.value;
+              send({
+                type: "kanvis:edit",
+                op: {
+                  kind: "text",
+                  selector: elSelector,
+                  fingerprint: fingerprint(el),
+                  before,
+                  after: last.value,
+                  rationale: msg.rationale
+                }
+              });
+            }
+          }
+          if (attrMutations.length > 0) {
+            const attributes = {};
+            const beforeAttributes = {};
+            for (const m of attrMutations) {
+              beforeAttributes[m.target] = el.getAttribute(m.target) ?? "";
+              attributes[m.target] = m.value;
+              el.setAttribute(m.target, m.value);
+            }
+            send({
+              type: "kanvis:edit",
+              op: {
+                kind: "attr",
+                selector: elSelector,
+                fingerprint: fingerprint(el),
+                attributes,
+                beforeAttributes,
+                rationale: msg.rationale
+              }
+            });
+          }
+          if (htmlMutations.length > 0) {
+            const last = htmlMutations[htmlMutations.length - 1];
+            if (last) {
+              const before = el.innerHTML;
+              const safe = sanitizeHtml(last.value);
+              el.innerHTML = safe;
+              send({
+                type: "kanvis:edit",
+                op: {
+                  kind: "html",
+                  selector: elSelector,
+                  fingerprint: fingerprint(el),
+                  before,
+                  after: safe,
+                  rationale: msg.rationale
+                }
+              });
+            }
+          }
+        }
+        if (selectedEl) {
+          positionOverlay(SELECT_OVERLAY_ID, selectedEl);
+          showHandles(selectedEl);
+        }
+        renderMultiOverlays();
       }
     });
   }
@@ -288,10 +610,18 @@
         positionOverlay(SELECT_OVERLAY_ID, selectedEl);
         showHandles(selectedEl);
       }
+      renderMultiOverlays();
     };
     window.addEventListener("scroll", reposition, true);
     window.addEventListener("resize", reposition);
     send({ type: "kanvis:ready" });
+    setTimeout(() => {
+      try {
+        const tokens = captureDesignTokens();
+        send({ type: "kanvis:design-tokens", tokens });
+      } catch {
+      }
+    }, 800);
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", start);
