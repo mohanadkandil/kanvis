@@ -1,0 +1,17 @@
+{
+  "name": "kanvis",
+  "private": true,
+  "version": "0.0.1",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev:web": "bun --filter @kanvis/web dev",
+    "dev:proxy": "bun --filter @kanvis/proxy dev",
+    "test": "bun --filter '*' test",
+    "typecheck": "bun --filter '*' typecheck",
+    "build": "bun --filter '*' build"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  }
+}
