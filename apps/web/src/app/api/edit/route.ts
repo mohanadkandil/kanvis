@@ -30,6 +30,28 @@ type DesignTokens = {
   radii?: string[]
   shadows?: string[]
   fontFamilies?: string[]
+  typography?: Record<string, {
+    color?: string
+    fontFamily?: string
+    fontSize?: string
+    fontWeight?: string
+    lineHeight?: string
+    letterSpacing?: string
+    textTransform?: string
+  }>
+  components?: {
+    card?: { backgroundColor?: string; padding?: string; borderRadius?: string; border?: string; boxShadow?: string; childCount?: number }
+    badge?: { backgroundColor?: string; color?: string; padding?: string; borderRadius?: string; fontSize?: string }
+    section?: { backgroundColor?: string; padding?: string }
+  }
+  palette?: {
+    primaryText?: string
+    secondaryTexts?: string[]
+    mutedTexts?: string[]
+    accents?: string[]
+    surfaces?: string[]
+  }
+  system?: { spacingScale?: string[]; sampledElementCount?: number }
 }
 
 type EditRequest = {
@@ -123,9 +145,25 @@ ABSOLUTE RULES (never violate these):
 You do not query the DOM. You do not verify anything. Assume the element exists. Choose mutations.
 
 CRITICAL: MATCH THE SITE'S TASTE.
-The user message often opens with "Site design tokens (match these)" — the page background, text color, font-family, palette, button styling, border-radius, shadows. These tokens are the design source of truth. Every CSS color/font-family/border-radius/shadow you output should match a value already present in the site or an obvious extension of it. NEVER drop in Tailwind blue (#3b82f6) when the site's existing accent is olive/black/cream. NEVER use border-radius 1rem when the site uses sharp 0px or subtle 0.25rem corners. NEVER swap the font-family unless the user explicitly asks for a different typeface. The kanvis output should look like the same designer wrote it — not an AI.
+The user message opens with "Site design tokens — these ARE the design system." It is structured into PAGE, COLOR ROLES, TYPOGRAPHY, COMPONENTS, and SYSTEM blocks. Each block tells you exactly what value to use for what kind of mutation. THIS IS THE DESIGN SYSTEM. You are not designing one — you are extending the one that exists.
 
-When you generate a status badge, button, or new child element via html mutation, derive its colors from the palette block, its font-family from the body font, and its radii from the existing radii block. If the site has an "Active" green accent visible in topBackgrounds or topColors, use that exact hex; don't invent #22c55e.
+How to read each block and pick values:
+
+- COLOR ROLES → "primary text" is the body text color (#... use this for normal text). "secondary text" is for de-emphasized labels. "muted/disabled text" is for hints/timestamps. "accent colors" is what to reach for when the user says "make it stand out", "highlight", "emphasize", "primary", "CTA", or any request that needs a non-neutral color. NEVER pick #3b82f6 or another stock blue when the accent list contains the site's actual accent. The site's accent might be green, orange, deep red — use what's listed.
+
+- TYPOGRAPHY → per-tag snapshot of font-size, weight, color, family. When you generate a heading inside an html mutation, copy h1's settings. When you generate body text, copy p's settings. When you generate fine print, copy small's settings. Don't invent a 1.5rem heading if the site's h2 is 1rem.
+
+- COMPONENTS → archetypes for card/badge/section/button/link. If the user asks for a status badge, take badge.backgroundColor + badge.color + badge.borderRadius + badge.fontSize as your starting point and only deviate when the user is explicitly asking for difference. If the user asks to redesign a card, take card.backgroundColor and card.padding and card.borderRadius — these ARE the site's card style.
+
+- SYSTEM → radii, shadows, spacing scale, fonts in use. When you set padding or margin, snap to the spacing scale. When you set border-radius, snap to one of the listed radii (often 0px on editorial sites; never invent 1rem unless 1rem already appears).
+
+Hard rules that follow from this:
+- NEVER drop in Tailwind blue (#3b82f6) when the accents list doesn't include it.
+- NEVER use border-radius 1rem when the radii list is "0px, 0.25rem".
+- NEVER swap the font-family unless the user explicitly asks for a different typeface.
+- NEVER use generic "make-it-look-good" defaults like #22c55e/0.5rem/1rem when the design system has its own equivalents.
+
+The kanvis output should look like the same designer wrote it. If you find yourself reaching for a value not listed in the tokens, ask whether that value is justified. The answer is almost always to pick the closest listed value instead.
 
 The "Primary element" block in the user message shows the actual outerHTML of the selected element including nested children when available (truncated if very long). Use this to understand structure before deciding what to change. If the element contains multiple children with similar shapes (a list of cards, a row of buttons), structural mutations should respect that: rebuild the children with consistent styling, not collapse them into a single block. If the user selected a wrapper expecting a section-level change, your html mutation should still preserve the children that exist — don't drop them.
 
@@ -309,37 +347,110 @@ export async function POST(req: Request): Promise<NextResponse<EditResponse>> {
 
   const sections: string[] = []
 
-  // Lead with the site's design tokens so the AI sees them BEFORE the
-  // request and treats them as the design source of truth, not as
-  // afterthought hints.
+  // Lead with the site's design tokens — the AI sees them BEFORE the
+  // request and treats them as the design source of truth. Structured into
+  // clear sections (page, color roles, typography, components, system) so
+  // the AI can pick the right value for each kind of mutation it generates.
   if (body.designTokens) {
     const t = body.designTokens
-    const lines: string[] = []
-    if (t.body?.backgroundColor) lines.push(`page background: ${t.body.backgroundColor}`)
-    if (t.body?.color) lines.push(`body text color: ${t.body.color}`)
-    if (t.body?.fontFamily) lines.push(`body font: ${t.body.fontFamily}`)
-    if (t.body?.fontSize) lines.push(`base font-size: ${t.body.fontSize}`)
-    if (t.body?.lineHeight) lines.push(`base line-height: ${t.body.lineHeight}`)
-    if (t.headings && Object.keys(t.headings).length > 0) {
-      const hl = Object.entries(t.headings)
-        .map(([tag, v]) => `${tag}=${v.fontSize ?? ''}/${v.fontWeight ?? ''}/${v.color ?? ''}`)
-        .join(', ')
-      lines.push(`heading scale: ${hl}`)
+    const blocks: string[] = []
+
+    // PAGE
+    if (t.body) {
+      const b = t.body
+      const pageLines = [
+        b.backgroundColor && `background: ${b.backgroundColor}`,
+        b.color && `text color: ${b.color}`,
+        b.fontFamily && `font: ${b.fontFamily.split(',')[0]?.trim().replace(/['"]/g, '')}`,
+        b.fontSize && `base font-size: ${b.fontSize}`,
+        b.lineHeight && `line-height: ${b.lineHeight}`,
+      ].filter(Boolean) as string[]
+      if (pageLines.length) blocks.push(`PAGE\n${pageLines.map((l) => `  ${l}`).join('\n')}`)
     }
-    if (t.link?.color) lines.push(`link color: ${t.link.color}`)
-    if (t.button) {
-      const b = t.button
-      lines.push(`button: bg=${b.backgroundColor ?? ''} fg=${b.color ?? ''} radius=${b.borderRadius ?? ''} padding=${b.padding ?? ''}`)
+
+    // COLOR ROLES — the highest-leverage info. Tells the AI which color is
+    // primary text vs muted secondary vs accent. When the user asks for
+    // "make this stand out" the AI picks from accents, not random hex.
+    if (t.palette) {
+      const p = t.palette
+      const paletteLines: string[] = []
+      if (p.primaryText) paletteLines.push(`primary text: ${p.primaryText}`)
+      if (p.secondaryTexts && p.secondaryTexts.length) {
+        paletteLines.push(`secondary text: ${p.secondaryTexts.join(', ')}`)
+      }
+      if (p.mutedTexts && p.mutedTexts.length) {
+        paletteLines.push(`muted/disabled text: ${p.mutedTexts.join(', ')}`)
+      }
+      if (p.accents && p.accents.length) {
+        paletteLines.push(`accent colors (use for CTAs, badges, emphasis): ${p.accents.join(', ')}`)
+      }
+      if (p.surfaces && p.surfaces.length) {
+        paletteLines.push(`surface backgrounds (cards, sections): ${p.surfaces.join(', ')}`)
+      }
+      if (paletteLines.length) blocks.push(`COLOR ROLES\n${paletteLines.map((l) => `  ${l}`).join('\n')}`)
     }
-    if (t.topColors && t.topColors.length > 0) lines.push(`palette (text): ${t.topColors.join(', ')}`)
-    if (t.topBackgrounds && t.topBackgrounds.length > 0) lines.push(`palette (backgrounds): ${t.topBackgrounds.join(', ')}`)
-    if (t.radii && t.radii.length > 0) lines.push(`existing radii: ${t.radii.join(', ')}`)
-    if (t.shadows && t.shadows.length > 0) lines.push(`existing shadows: ${t.shadows.slice(0, 2).join(' | ')}`)
+
+    // TYPOGRAPHY — per-tag style snapshot. AI now knows h2 vs p vs small.
+    if (t.typography && Object.keys(t.typography).length > 0) {
+      const typeLines = Object.entries(t.typography)
+        .map(([tag, ts]) => {
+          const parts = [
+            ts.fontSize,
+            ts.fontWeight && ts.fontWeight !== '400' ? ts.fontWeight : null,
+            ts.color,
+            ts.fontFamily,
+            ts.textTransform,
+            ts.letterSpacing && ts.letterSpacing !== 'normal' ? `tracking ${ts.letterSpacing}` : null,
+          ].filter(Boolean)
+          return `${tag}: ${parts.join(' · ')}`
+        })
+      blocks.push(`TYPOGRAPHY\n${typeLines.map((l) => `  ${l}`).join('\n')}`)
+    }
+
+    // COMPONENT ARCHETYPES — gives the AI concrete templates to match when
+    // it generates new badges, cards, sections.
+    if (t.components) {
+      const compLines: string[] = []
+      if (t.components.card) {
+        const c = t.components.card
+        compLines.push(
+          `card: bg ${c.backgroundColor} · padding ${c.padding} · radius ${c.borderRadius} · ${c.boxShadow ? 'shadow yes' : 'no shadow'}`,
+        )
+      }
+      if (t.components.badge) {
+        const b = t.components.badge
+        compLines.push(`badge: bg ${b.backgroundColor} · fg ${b.color} · radius ${b.borderRadius} · size ${b.fontSize}`)
+      }
+      if (t.components.section) {
+        const s = t.components.section
+        compLines.push(`section: bg ${s.backgroundColor} · padding ${s.padding}`)
+      }
+      if (t.button) {
+        const bt = t.button
+        compLines.push(`button: bg ${bt.backgroundColor ?? ''} · fg ${bt.color ?? ''} · radius ${bt.borderRadius ?? ''} · padding ${bt.padding ?? ''}`)
+      }
+      if (t.link?.color) compLines.push(`link: ${t.link.color}${t.link.textDecoration ? ' · ' + t.link.textDecoration : ''}`)
+      if (compLines.length) blocks.push(`COMPONENTS\n${compLines.map((l) => `  ${l}`).join('\n')}`)
+    }
+
+    // SYSTEM scale — radii, shadows, spacing, fonts.
+    const sysLines: string[] = []
+    if (t.radii && t.radii.length > 0) sysLines.push(`radii: ${t.radii.join(', ')}`)
+    if (t.shadows && t.shadows.length > 0) sysLines.push(`shadows: ${t.shadows.slice(0, 2).join(' | ')}`)
+    if (t.system?.spacingScale && t.system.spacingScale.length > 0) {
+      sysLines.push(`spacing scale: ${t.system.spacingScale.slice(0, 6).join(', ')}`)
+    }
     if (t.fontFamilies && t.fontFamilies.length > 1) {
-      lines.push(`fonts in use: ${t.fontFamilies.slice(0, 3).map((f) => f.split(',')[0]).join(', ')}`)
+      sysLines.push(
+        `fonts in use: ${t.fontFamilies.slice(0, 3).map((f) => f.split(',')[0]?.trim().replace(/['"]/g, '')).join(' · ')}`,
+      )
     }
-    if (lines.length > 0) {
-      sections.push(`Site design tokens (match these):\n${lines.join('\n')}`)
+    if (sysLines.length) blocks.push(`SYSTEM\n${sysLines.map((l) => `  ${l}`).join('\n')}`)
+
+    if (blocks.length > 0) {
+      sections.push(
+        `Site design tokens — these ARE the design system. Match them. Do not invent your own colors, fonts, or radii unless the user asks.\n\n${blocks.join('\n\n')}`,
+      )
     }
   }
 
