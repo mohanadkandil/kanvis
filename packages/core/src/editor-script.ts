@@ -147,9 +147,10 @@ function fingerprint(el: Element): string {
 
 // Capture the element's outerHTML (children included) so the AI can reason
 // about structure: which children exist, how they're laid out, what to
-// restructure. Truncated to ~4KB to keep prompts cheap; the model gets
-// enough to understand the shape without bloating context.
-function captureSnapshot(el: Element, maxChars = 4000): string {
+// restructure. 16KB is generous but keeps token cost trivial — even a deeply
+// nested section with 20 cards rarely exceeds it, and the model gets the
+// full shape without truncation.
+function captureSnapshot(el: Element, maxChars = 16000): string {
   // Strip our own runtime markers before serializing.
   const clone = el.cloneNode(true) as Element
   clone.querySelectorAll(`#${HOVER_OVERLAY_ID}, #${SELECT_OVERLAY_ID}, .${HANDLE_CLASS}, [id^="${MULTI_OVERLAY_PREFIX}"], #${STYLE_ID}`).forEach((n) => n.remove())
@@ -240,31 +241,50 @@ function captureDesignTokens(): DesignTokens {
     }
   }
 
-  // Sample up to 300 elements for color/background/radius/shadow/font frequency.
+  // Sample strategy: combine targeted selectors (high-signal elements) with a
+  // larger generic sweep, weighted so styled elements count more. The old
+  // 300-flat-element sample missed brand-bearing UI on deep trees.
   const colorCounts = new Map<string, number>()
   const bgCounts = new Map<string, number>()
   const radiusCounts = new Map<string, number>()
   const shadowSet = new Set<string>()
   const fontSet = new Set<string>()
-  const candidates = Array.from(document.querySelectorAll('*'))
-  const sampleSize = Math.min(candidates.length, 300)
-  for (let i = 0; i < sampleSize; i++) {
-    const el = candidates[i]
-    if (!el || isKanvisEl(el)) continue
+
+  // Bucket 1 — high-signal selectors (heavy weight).
+  // Buttons, headings, cards, badges, links, CTAs typically carry the
+  // accent color and font scale of the site.
+  const targeted = Array.from(document.querySelectorAll(
+    'button, [role="button"], .btn, .button, ' +
+    'h1, h2, h3, h4, ' +
+    '.card, [class*="card"], [class*="Card"], ' +
+    '.badge, [class*="badge"], .tag, [class*="tag"], .pill, [class*="pill"], ' +
+    '[class*="cta"], [class*="primary"], [class*="accent"], ' +
+    'main > *, section > *, article > *, header > *',
+  )).slice(0, 200)
+
+  // Bucket 2 — generic sweep, capped to keep work bounded.
+  const generic = Array.from(document.querySelectorAll('*')).slice(0, 800)
+
+  const sampleEl = (el: Element, weight: number) => {
+    if (!el || isKanvisEl(el)) return
     const cs = getComputedStyle(el)
     const color = rgbToHex(cs.color)
-    if (color !== 'transparent') colorCounts.set(color, (colorCounts.get(color) ?? 0) + 1)
+    if (color !== 'transparent') colorCounts.set(color, (colorCounts.get(color) ?? 0) + weight)
     const bg = rgbToHex(cs.backgroundColor)
     if (bg !== 'transparent' && bg !== tokens.body.backgroundColor) {
-      bgCounts.set(bg, (bgCounts.get(bg) ?? 0) + 1)
+      bgCounts.set(bg, (bgCounts.get(bg) ?? 0) + weight)
     }
     const r = cs.borderRadius
-    if (r && r !== '0px') radiusCounts.set(r, (radiusCounts.get(r) ?? 0) + 1)
+    if (r && r !== '0px') radiusCounts.set(r, (radiusCounts.get(r) ?? 0) + weight)
     const sh = cs.boxShadow
     if (sh && sh !== 'none' && shadowSet.size < 4) shadowSet.add(sh)
     const ff = cs.fontFamily
     if (ff && fontSet.size < 4) fontSet.add(ff)
   }
+
+  // Targeted elements count 3x — they're more representative of the brand.
+  for (const el of targeted) sampleEl(el, 3)
+  for (const el of generic) sampleEl(el, 1)
 
   tokens.topColors = [...colorCounts.entries()]
     .sort((a, b) => b[1] - a[1])
@@ -755,16 +775,20 @@ function start() {
 
   send({ type: 'kanvis:ready' })
 
-  // Capture design tokens after a short delay so framework hydration has
-  // settled and computed styles reflect the final visual state.
-  setTimeout(() => {
+  // Capture design tokens twice — once shortly after ready (initial),
+  // once after a longer delay (catches late-hydrating SPAs). Each send
+  // overwrites the previous on the parent.
+  const captureAndSend = (label: string) => {
     try {
       const tokens = captureDesignTokens()
+      console.log(`[kanvis] design tokens captured (${label}):`, tokens)
       send({ type: 'kanvis:design-tokens', tokens })
-    } catch {
-      // Best-effort. If something throws, the AI just falls back to defaults.
+    } catch (e) {
+      console.warn(`[kanvis] design token capture failed (${label}):`, e)
     }
-  }, 800)
+  }
+  setTimeout(() => captureAndSend('initial 800ms'), 800)
+  setTimeout(() => captureAndSend('settled 2500ms'), 2500)
 }
 
 if (document.readyState === 'loading') {

@@ -293,8 +293,10 @@ export async function POST(req: Request): Promise<NextResponse<EditResponse>> {
     const classes = req.currentClasses.join(' ')
     const inlineStyle = req.currentInlineStyle ?? ''
     const html = req.currentHtml ?? ''
-    if (html && html.length <= 4500) return html
-    if (html) return html.slice(0, 4500) + ' …[truncated]'
+    // Match the editor-script's capture limit (16KB). The model can handle
+    // it, the cost is rounding error.
+    if (html && html.length <= 16000) return html
+    if (html) return html.slice(0, 16000) + ' …[truncated]'
     const text = (req.currentText ?? '').slice(0, 200)
     const childInfo = req.childCount ? ` (${req.childCount} children)` : ''
     return [

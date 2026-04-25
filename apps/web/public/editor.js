@@ -106,7 +106,7 @@
     const text = (el.textContent ?? "").trim().slice(0, 50);
     return `${el.tagName.toLowerCase()}|${text}`;
   }
-  function captureSnapshot(el, maxChars = 4000) {
+  function captureSnapshot(el, maxChars = 16000) {
     const clone = el.cloneNode(true);
     clone.querySelectorAll(`#${HOVER_OVERLAY_ID}, #${SELECT_OVERLAY_ID}, .${HANDLE_CLASS}, [id^="${MULTI_OVERLAY_PREFIX}"], #${STYLE_ID}`).forEach((n) => n.remove());
     const html = clone.outerHTML ?? "";
@@ -180,30 +180,33 @@
     const radiusCounts = new Map;
     const shadowSet = new Set;
     const fontSet = new Set;
-    const candidates = Array.from(document.querySelectorAll("*"));
-    const sampleSize = Math.min(candidates.length, 300);
-    for (let i = 0;i < sampleSize; i++) {
-      const el = candidates[i];
+    const targeted = Array.from(document.querySelectorAll('button, [role="button"], .btn, .button, ' + "h1, h2, h3, h4, " + '.card, [class*="card"], [class*="Card"], ' + '.badge, [class*="badge"], .tag, [class*="tag"], .pill, [class*="pill"], ' + '[class*="cta"], [class*="primary"], [class*="accent"], ' + "main > *, section > *, article > *, header > *")).slice(0, 200);
+    const generic = Array.from(document.querySelectorAll("*")).slice(0, 800);
+    const sampleEl = (el, weight) => {
       if (!el || isKanvisEl(el))
-        continue;
+        return;
       const cs = getComputedStyle(el);
       const color = rgbToHex(cs.color);
       if (color !== "transparent")
-        colorCounts.set(color, (colorCounts.get(color) ?? 0) + 1);
+        colorCounts.set(color, (colorCounts.get(color) ?? 0) + weight);
       const bg = rgbToHex(cs.backgroundColor);
       if (bg !== "transparent" && bg !== tokens.body.backgroundColor) {
-        bgCounts.set(bg, (bgCounts.get(bg) ?? 0) + 1);
+        bgCounts.set(bg, (bgCounts.get(bg) ?? 0) + weight);
       }
       const r = cs.borderRadius;
       if (r && r !== "0px")
-        radiusCounts.set(r, (radiusCounts.get(r) ?? 0) + 1);
+        radiusCounts.set(r, (radiusCounts.get(r) ?? 0) + weight);
       const sh = cs.boxShadow;
       if (sh && sh !== "none" && shadowSet.size < 4)
         shadowSet.add(sh);
       const ff = cs.fontFamily;
       if (ff && fontSet.size < 4)
         fontSet.add(ff);
-    }
+    };
+    for (const el of targeted)
+      sampleEl(el, 3);
+    for (const el of generic)
+      sampleEl(el, 1);
     tokens.topColors = [...colorCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([c]) => c);
     tokens.topBackgrounds = [...bgCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([c]) => c);
     tokens.radii = [...radiusCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([r]) => r);
@@ -615,13 +618,17 @@
     window.addEventListener("scroll", reposition, true);
     window.addEventListener("resize", reposition);
     send({ type: "kanvis:ready" });
-    setTimeout(() => {
+    const captureAndSend = (label) => {
       try {
         const tokens = captureDesignTokens();
+        console.log(`[kanvis] design tokens captured (${label}):`, tokens);
         send({ type: "kanvis:design-tokens", tokens });
-      } catch {
+      } catch (e) {
+        console.warn(`[kanvis] design token capture failed (${label}):`, e);
       }
-    }, 800);
+    };
+    setTimeout(() => captureAndSend("initial 800ms"), 800);
+    setTimeout(() => captureAndSend("settled 2500ms"), 2500);
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", start);

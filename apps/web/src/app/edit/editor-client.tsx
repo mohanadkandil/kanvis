@@ -97,6 +97,7 @@ export default function EditorClient() {
   const inFlightControllerRef = useRef<AbortController | null>(null)
   const [aiNoOpMessage, setAiNoOpMessage] = useState<string | null>(null)
   const [designTokens, setDesignTokens] = useState<DesignTokens | null>(null)
+  const [tokensOpen, setTokensOpen] = useState(false)
   useEffect(() => {
     designTokensRef.current = designTokens
   }, [designTokens])
@@ -163,6 +164,7 @@ export default function EditorClient() {
           setAiError(`Couldn't apply to ${msg.selector} (${msg.reason}). The page probably re-rendered. Click the element again.`)
           break
         case 'kanvis:design-tokens':
+          console.log('[kanvis] design tokens received from iframe:', msg.tokens)
           setDesignTokens(msg.tokens)
           break
       }
@@ -208,7 +210,32 @@ export default function EditorClient() {
       controller.abort()
     }, 25_000)
 
-    console.log('[chat] →', { selector: target.selector, prompt: userPrompt })
+    console.log('[chat] →', {
+      selector: target.selector,
+      prompt: userPrompt,
+      structure: {
+        tagName: target.tagName,
+        classCount: target.classes.length,
+        childCount: target.childCount,
+        textPreview: target.text.slice(0, 80),
+        outerHtmlBytes: target.outerHtml.length,
+        outerHtmlTruncated: target.outerHtml.endsWith('…[truncated]'),
+        outerHtmlPreview: target.outerHtml.slice(0, 400) + (target.outerHtml.length > 400 ? '…' : ''),
+      },
+      additional: target.additional.map((a) => ({
+        selector: a.selector,
+        childCount: a.childCount,
+        outerHtmlBytes: a.outerHtml.length,
+      })),
+      designTokens: designTokensRef.current
+        ? {
+            captured: true,
+            palette: designTokensRef.current.topBackgrounds.concat(designTokensRef.current.topColors).slice(0, 5),
+            font: designTokensRef.current.body.fontFamily.split(',')[0],
+            radii: designTokensRef.current.radii,
+          }
+        : { captured: false, reason: 'tokens not received from iframe yet' },
+    })
 
     try {
       const resp = await fetch('/api/edit', {
@@ -336,26 +363,118 @@ export default function EditorClient() {
             </span>
           </div>
         </div>
-        {designTokens && (
-          <div
-            className="flex items-center gap-1 text-[10px] text-neutral-500"
-            title={`Site palette: ${[designTokens.body.backgroundColor, designTokens.body.color, ...designTokens.topBackgrounds].slice(0, 5).join(', ')} · Font: ${designTokens.body.fontFamily.split(',')[0]?.replace(/"/g, '')}`}
-          >
-            <span>taste</span>
-            <div className="flex items-center gap-0.5">
-              {[designTokens.body.backgroundColor, designTokens.body.color, ...designTokens.topBackgrounds.slice(0, 3)]
-                .filter((c, i, arr) => c && c !== 'transparent' && arr.indexOf(c) === i)
-                .slice(0, 5)
-                .map((color, i) => (
-                  <div
-                    key={i}
-                    className="h-3 w-3 rounded-sm border border-neutral-300 dark:border-neutral-700"
-                    style={{ backgroundColor: color }}
+        <div className="relative">
+          {designTokens ? (
+            <button
+              onClick={() => setTokensOpen((v) => !v)}
+              className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[10px] text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-900 dark:hover:bg-neutral-800 dark:hover:text-neutral-100"
+              title="Click to inspect what kanvis is sending to the AI as site context"
+            >
+              <span>taste</span>
+              <div className="flex items-center gap-0.5">
+                {[designTokens.body.backgroundColor, designTokens.body.color, ...designTokens.topBackgrounds.slice(0, 3)]
+                  .filter((c, i, arr) => c && c !== 'transparent' && arr.indexOf(c) === i)
+                  .slice(0, 5)
+                  .map((color, i) => (
+                    <div
+                      key={i}
+                      className="h-3 w-3 rounded-sm border border-neutral-300 dark:border-neutral-700"
+                      style={{ backgroundColor: color }}
+                    />
+                  ))}
+              </div>
+            </button>
+          ) : (
+            <span
+              className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[10px] text-amber-600 dark:text-amber-400"
+              title="kanvis hasn't captured design tokens yet — wait a moment after page load"
+            >
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
+              capturing taste…
+            </span>
+          )}
+          {tokensOpen && designTokens && (
+            <div className="absolute right-0 top-full z-50 mt-1 w-80 rounded-lg border border-neutral-200 bg-white p-3 shadow-xl dark:border-neutral-800 dark:bg-neutral-950">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+                  what kanvis sees
+                </span>
+                <button
+                  onClick={() => setTokensOpen(false)}
+                  className="text-neutral-400 hover:text-neutral-700"
+                >
+                  ×
+                </button>
+              </div>
+              <dl className="space-y-1.5 text-[11px]">
+                <TokenRow label="page bg" value={designTokens.body.backgroundColor} swatch />
+                <TokenRow label="text" value={designTokens.body.color} swatch />
+                <TokenRow label="font" value={designTokens.body.fontFamily.split(',')[0]?.replace(/"/g, '') || '—'} />
+                <TokenRow label="base size" value={designTokens.body.fontSize} />
+                {designTokens.button && (
+                  <TokenRow
+                    label="button"
+                    value={`bg ${designTokens.button.backgroundColor} · radius ${designTokens.button.borderRadius || '0'}`}
                   />
-                ))}
+                )}
+                <div className="pt-1.5">
+                  <div className="text-[9px] uppercase tracking-wider text-neutral-500">palette (text)</div>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {designTokens.topColors.map((c) => (
+                      <div
+                        key={c}
+                        className="flex items-center gap-1 rounded border border-neutral-200 px-1 py-0.5 font-mono text-[9px] dark:border-neutral-800"
+                      >
+                        <div className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: c }} />
+                        {c}
+                      </div>
+                    ))}
+                    {designTokens.topColors.length === 0 && <span className="text-neutral-400">none captured</span>}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[9px] uppercase tracking-wider text-neutral-500">palette (bg)</div>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {designTokens.topBackgrounds.map((c) => (
+                      <div
+                        key={c}
+                        className="flex items-center gap-1 rounded border border-neutral-200 px-1 py-0.5 font-mono text-[9px] dark:border-neutral-800"
+                      >
+                        <div className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: c }} />
+                        {c}
+                      </div>
+                    ))}
+                    {designTokens.topBackgrounds.length === 0 && (
+                      <span className="text-neutral-400">none captured</span>
+                    )}
+                  </div>
+                </div>
+                {designTokens.radii.length > 0 && (
+                  <div>
+                    <div className="text-[9px] uppercase tracking-wider text-neutral-500">radii</div>
+                    <div className="mt-1 font-mono text-[10px] text-neutral-600 dark:text-neutral-400">
+                      {designTokens.radii.join(', ')}
+                    </div>
+                  </div>
+                )}
+                {designTokens.fontFamilies.length > 1 && (
+                  <div>
+                    <div className="text-[9px] uppercase tracking-wider text-neutral-500">fonts in use</div>
+                    <div className="mt-1 truncate font-mono text-[10px] text-neutral-600 dark:text-neutral-400">
+                      {designTokens.fontFamilies
+                        .map((f) => f.split(',')[0]?.replace(/"/g, '') || '')
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </div>
+                  </div>
+                )}
+              </dl>
+              <div className="mt-2 border-t border-neutral-200 pt-2 text-[10px] text-neutral-500 dark:border-neutral-800">
+                These values are sent on every chat request as &quot;Site design tokens (match these)&quot;. The AI is told to derive colors/fonts/radii from this list.
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
         <button
           onClick={() => setEditsOpen((v) => !v)}
           disabled={edits.length === 0}
@@ -406,6 +525,25 @@ export default function EditorClient() {
                 <span className="font-mono text-[10px] text-neutral-500">
                   .{selected.classes.slice(0, 2).join('.')}
                   {selected.classes.length > 2 && '…'}
+                </span>
+              )}
+            </div>
+            {/* Context indicator — shows kanvis IS sending nested structure */}
+            <div
+              className="mt-1.5 flex items-center gap-1.5 text-[10px] text-neutral-500"
+              title="kanvis sends this element's outerHTML (children included) so the AI can reason about structure when it restructures."
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M3 6h18" />
+                <path d="M3 12h12" />
+                <path d="M3 18h6" />
+              </svg>
+              <span>
+                {selected.childCount} child{selected.childCount === 1 ? '' : 'ren'} · {formatBytes(selected.outerHtml.length)} of context
+              </span>
+              {selected.outerHtml.endsWith('…[truncated]') && (
+                <span className="rounded bg-amber-100 px-1 text-[9px] uppercase tracking-wider text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                  truncated
                 </span>
               )}
             </div>
@@ -680,4 +818,26 @@ function hostnameOf(url: string): string {
   } catch {
     return url
   }
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`
+}
+
+function TokenRow({ label, value, swatch }: { label: string; value: string; swatch?: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-[9px] uppercase tracking-wider text-neutral-500">{label}</span>
+      <span className="flex items-center gap-1 font-mono text-[10px]">
+        {swatch && (
+          <span
+            className="h-2.5 w-2.5 rounded-sm border border-neutral-300 dark:border-neutral-700"
+            style={{ backgroundColor: value }}
+          />
+        )}
+        <span className="max-w-[180px] truncate">{value}</span>
+      </span>
+    </div>
+  )
 }
