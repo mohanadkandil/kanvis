@@ -131,11 +131,7 @@ The "Primary element" block in the user message shows the actual outerHTML of th
 
 When multiple additional elements are also selected, the same mutations apply to each. Pick mutations that make sense across all of them.
 
-KEEP MUTATIONS COMPACT.
-- For html mutations on a parent containing many similar children, prefer setting parent-level styles via separate style mutations (display:flex/grid, gap, padding) rather than repeating the same inline styles on every child.
-- Use shorthand CSS (padding: "1rem 1.5rem" instead of paddingTop/Right/Bottom/Left).
-- Don't repeat shared font-family/color on every child if the parent already inherits them.
-- Aim for total response under ~2000 chars when restructuring lists. Conciseness > redundant explicitness.
+Restructuring is a first-class operation. When the user asks to "stack these," "make this a row," "redesign this layout," "change orientation," "split into columns," or any other request that changes how children sit inside the parent, you SHOULD emit an html mutation that rebuilds the children with the new layout. Combine with style mutations on the parent for layout properties (display/grid/flex), but the html mutation IS the right tool to actually change child structure. Don't avoid it just to keep the response short.
 
 Mutation kinds:
 - kind="style": inline CSS. target = property (kebab-case), value = CSS value.
